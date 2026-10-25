@@ -1,0 +1,221 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#0e0f13" />
+    <title>追剧神器 wzy · 在页播放</title>
+    <link rel="icon" type="image/svg+xml" href="favicon.svg" />
+    <link rel="stylesheet" href="styles.css" />
+    <script src="https://cdn.jsdelivr.net/npm/vue@3.4.38/dist/vue.global.prod.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.17/dist/hls.min.js"></script>
+  </head>
+  <body>
+    <div id="app">
+      <div class="glow glow-a"></div>
+      <div class="glow glow-b"></div>
+      <canvas id="stars"></canvas>
+
+      <!-- 运行模式提示：GitHub Pages 直接在浏览器中完成搜索、详情和解析 -->
+      <transition name="fade">
+        <div v-if="MODE === 'static'" class="offline-banner static">
+          🛰️ GitHub Pages 静态模式：搜索、集数和播放地址解析均在浏览器中完成；如果出现 “Failed to fetch”，请检查网络或稍后重试。
+        </div>
+      </transition>
+
+      <!-- 顶栏 -->
+      <header class="topbar">
+        <div class="brand">
+          <span class="brand-mark">▶</span>
+          <div><strong>追剧神器</strong><small>SEARCH · PLAY · BINGE</small></div>
+        </div>
+        <div class="top-search" v-show="searched">
+          <form @submit.prevent="search">
+            <span class="search-ico">⌕</span>
+            <input
+              v-model.trim="query"
+              type="search"
+              placeholder="搜索剧名…"
+              @keydown.esc="query = ''"
+            />
+            <button type="submit" :disabled="loadingSearch">{{ loadingSearch ? '搜索中…' : '搜索' }}</button>
+          </form>
+        </div>
+        <div class="status-dot"><i></i> {{ MODE === 'backend' ? '后端服务在线' : MODE === 'static' ? 'GitHub Pages 静态模式' : '正在检测运行模式' }}</div>
+      </header>
+
+      <main>
+      <transition name="view" mode="out-in">
+        <!-- 播放器 -->
+        <section v-if="active" class="player-section" key="player">
+          <div class="player-top">
+            <button class="back-btn" @click="closePlayer">← 返回搜索结果</button>
+            <div class="playing-now-tag" v-if="currentEpisode">
+              <span class="eq" aria-hidden="true"><i></i><i></i><i></i></span>
+              正在播放 · {{ currentEpisode.name }}
+            </div>
+          </div>
+          <div class="player-layout">
+            <div class="player-main">
+              <div class="video-box">
+                <video ref="video" controls playsinline></video>
+                <transition name="fade">
+                  <div v-if="playState !== 'idle'" class="video-overlay" :class="playState">
+                    <template v-if="playState === 'loading'">
+                      <span class="spinner" aria-hidden="true"></span>
+                      <span>正在解析播放地址…</span>
+                    </template>
+                    <template v-else-if="playState === 'error'">
+                      <span>{{ playError }}</span>
+                      <small>可尝试换一个播放源或重新点击本集</small>
+                    </template>
+                  </div>
+                </transition>
+              </div>
+              <div class="player-controls">
+                <button class="ctl-btn" :disabled="!hasPrev" @click="playByOffset(-1)">⏮ 上一集</button>
+                <button class="ctl-btn" :disabled="!hasNext" @click="playByOffset(1)">下一集 ⏭</button>
+                <label class="autoplay-toggle" :class="{ on: autoNext }">
+                  <input type="checkbox" v-model="autoNext" />
+                  <span class="switch"></span>自动连播
+                </label>
+              </div>
+              <div class="now-playing">
+                <h2>{{ active.name }} <small v-if="currentEpisode">{{ currentEpisode.name }}</small></h2>
+                <p class="meta-chips">
+                  <span v-if="active.year">{{ active.year }}</span>
+                  <span v-if="active.area">{{ active.area }}</span>
+                  <span v-if="active.class">{{ active.class }}</span>
+                  <span v-if="active.score">★ {{ active.score }}</span>
+                </p>
+                <p class="desc">{{ active.content || active.blurb || '暂无简介' }}</p>
+              </div>
+            </div>
+
+            <!-- 集数面板 -->
+            <aside class="episode-panel">
+              <div class="panel-head">
+                <h3>选集 <span class="ep-count">{{ episodes.length }}</span></h3>
+                <div class="source-tabs" v-if="sources.length > 1">
+                  <button
+                    v-for="(s, i) in sources"
+                    :key="i"
+                    :class="{ active: i === sourceIndex }"
+                    @click="switchSource(i)"
+                  >{{ sourceLabel(s, i) }}</button>
+                </div>
+              </div>
+              <input
+                v-if="episodes.length > 12"
+                v-model.trim="episodeFilter"
+                class="ep-filter"
+                type="text"
+                placeholder="筛选集数，如 12 或 第12集"
+              />
+              <div class="episode-grid">
+                <button
+                  v-for="(ep, i) in filteredEpisodes"
+                  :key="i"
+                  :class="{ active: currentEpisode && currentEpisode.url === ep.url }"
+                  @click="playEpisode(ep)"
+                >{{ ep.name }}</button>
+              </div>
+              <p v-if="episodes.length && !filteredEpisodes.length" class="empty-tip">没有匹配“{{ episodeFilter }}”的集数</p>
+              <p v-else-if="!episodes.length" class="empty-tip">该剧集暂无可用播放源</p>
+            </aside>
+          </div>
+        </section>
+
+        <!-- 搜索结果 -->
+        <section v-else class="results-section" key="results">
+          <!-- 首页 Hero 主视觉 -->
+          <div class="hero" v-if="!searched">
+            <div class="hero-posters left" aria-hidden="true">
+              <div v-for="(p, i) in heroPostersLeft" :key="p.name" class="hposter" :class="'p' + (i + 1)">
+                <img v-if="p.pic" :src="imgSrc(p.pic)" :alt="p.name" loading="lazy" referrerpolicy="no-referrer" @error="p.pic = ''" />
+                <span>{{ p.name }}</span>
+              </div>
+            </div>
+            <div class="hero-posters right" aria-hidden="true">
+              <div v-for="(p, i) in heroPostersRight" :key="p.name" class="hposter" :class="'p' + (i + 4)">
+                <img v-if="p.pic" :src="imgSrc(p.pic)" :alt="p.name" loading="lazy" referrerpolicy="no-referrer" @error="p.pic = ''" />
+                <span>{{ p.name }}</span>
+              </div>
+            </div>
+            <p class="hero-eyebrow">✦ 私人观影台 · 聚合四个渠道</p>
+            <h1 class="hero-title">搜剧名 · 选集数<br /><em>即刻观看。</em></h1>
+            <p class="hero-sub">输入剧名，一键搜索全网片源；选好集数直接在页面内播放，无需跳转任何平台。</p>
+            <form class="hero-search" @submit.prevent="search">
+              <span class="search-ico">⌕</span>
+              <input
+                v-model.trim="query"
+                type="search"
+                placeholder="输入剧名，例如：庆余年、漫长的季节…"
+                @keydown.esc="query = ''"
+              />
+              <button type="submit" :disabled="loadingSearch">{{ loadingSearch ? '搜索中…' : '立即搜索' }}</button>
+            </form>
+            <div class="hero-tags">
+              <span class="hero-tag">🎬 电视剧</span>
+              <span class="hero-tag">🍿 综艺</span>
+              <span class="hero-tag">🎭 动漫</span>
+              <span class="hero-tag">⚡ 多源切换</span>
+            </div>
+            <div class="quick-row center">
+              <span>热门推荐</span>
+              <button v-for="q in hotQueries" :key="q" @click="quickSearch(q)">{{ q }}</button>
+            </div>
+          </div>
+          <div class="section-head" v-else>
+            <h1>“{{ lastQuery }}” 的搜索结果</h1>
+            <span class="count">{{ results.length }} 部作品</span>
+          </div>
+
+          <div class="quick-row" v-if="searched">
+            <span>换个试试</span>
+            <button v-for="q in hotQueries" :key="q" @click="quickSearch(q)">{{ q }}</button>
+          </div>
+
+          <p v-if="searchMsg" class="msg" :class="{ err: searchErr }">{{ searchMsg }}</p>
+
+          <!-- 加载骨架屏 -->
+          <div v-if="loadingSearch && !results.length" class="grid">
+            <div v-for="i in 8" :key="i" class="card skeleton-card">
+              <div class="skeleton poster"></div>
+              <div class="card-body">
+                <div class="skeleton line w70"></div>
+                <div class="skeleton line w40"></div>
+              </div>
+            </div>
+          </div>
+
+          <div class="grid" v-else>
+            <article v-for="item in results" :key="item.id" class="card" @click="openShow(item)">
+              <div class="poster">
+                <img v-if="item.pic" :src="imgSrc(item.pic)" :alt="item.name" loading="lazy" referrerpolicy="no-referrer" @error="imgFail" />
+                <div v-else class="poster-fallback">{{ item.name }}</div>
+                <span v-if="item.remarks" class="badge">{{ item.remarks }}</span>
+                <span v-if="item.srcName" class="src-badge">{{ item.srcName }}</span>
+                <div class="play-hint">播放</div>
+              </div>
+              <div class="card-body">
+                <h3 :title="item.name">{{ item.name }}</h3>
+                <p class="meta">{{ item.year }}<template v-if="item.class"> · {{ item.class }}</template></p>
+                <p class="blurb">{{ item.blurb || '暂无简介' }}</p>
+              </div>
+            </article>
+          </div>
+
+          <div v-if="searched && !loadingSearch && !results.length" class="big-empty">
+            <div class="big-empty-icon">🎬</div>
+            <p>没有找到“{{ lastQuery }}”，换个关键词试试</p>
+          </div>
+        </section>
+      </transition>
+      </main>
+
+      <footer>王振业追剧神器 · 私人产品，如需使用请勿外传！！！</footer>
+    </div>
+    <script src="app.js"></script>
+  </body>
+</html>
